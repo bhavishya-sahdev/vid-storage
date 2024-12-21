@@ -15,7 +15,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 }
 
 pub async fn upload_video(
-    mut payload: Multipart,
+    payload: Multipart,
     pool: web::Data<DbPool>,
 ) -> Result<HttpResponse, Error> {
     let video_id = Uuid::new_v4();
