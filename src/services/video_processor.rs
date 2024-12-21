@@ -65,7 +65,6 @@ pub async fn handle_upload(
 
     // Spawn video processing
     let video_id_str = video_id.to_string();
-    let conn = &mut pool.get().await.expect("Failed to get DB connection");
 
     tokio::spawn(async move {
         let mut conn = pool.get().await.expect("Failed to get DB connection");
