@@ -18,6 +18,8 @@ pub async fn upload_video(
     payload: Multipart,
     pool: web::Data<DbPool>,
 ) -> Result<HttpResponse, Error> {
+    use crate::db::schema::videos::dsl::*;
+
     let video_id = Uuid::new_v4();
     let conn = &mut pool.get().await.expect("Failed to get DB connection");
 
@@ -37,7 +39,26 @@ pub async fn upload_video(
         .await
         .map_err(|_e| actix_web::error::ErrorInternalServerError("Database error"))?;
 
-    video_processor::handle_upload(payload, video_id, pool).await?;
+    match video_processor::handle_upload(payload, video_id, pool).await {
+        Ok(_) => {
+            diesel::update(crate::db::schema::videos::table)
+                .filter(crate::db::schema::videos::id.eq(video_id))
+                .set(crate::db::schema::videos::status.eq("processing"))
+                .execute(conn)
+                .await
+                .map_err(|_e| actix_web::error::ErrorInternalServerError("Database error"))?;
+        }
+        Err(e) => {
+            log::error!("Failed to handle upload: {}", e);
+            diesel::update(crate::db::schema::videos::table)
+                .filter(crate::db::schema::videos::id.eq(video_id))
+                .set(crate::db::schema::videos::status.eq("failed"))
+                .execute(conn)
+                .await
+                .map_err(|_e| actix_web::error::ErrorInternalServerError("Database error"))?;
+            return Err(e);
+        }
+    }
 
     Ok(HttpResponse::Ok().json(video))
 }
