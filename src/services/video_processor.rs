@@ -8,6 +8,7 @@ use chrono::Utc;
 use diesel::ExpressionMethods;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{StreamExt, TryStreamExt};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -134,9 +135,19 @@ async fn process_video(v_id: &str, conn: &mut AsyncPgConnection) -> Result<()> {
     }
 
     let uuid_vid_id = Uuid::parse_str(v_id).expect("Failed to parse video id into uuid");
+    let path_str = input_path
+        .as_os_str()
+        .to_str()
+        .expect("Failed to convert input path to string");
+    let duration = get_video_duration(path_str)
+        .await
+        .expect("failed to get video duration");
     match diesel::update(videos::table)
         .filter(videos::id.eq(uuid_vid_id))
-        .set(videos::status.eq("processed"))
+        .set((
+            videos::status.eq("processed"),
+            videos::duration.eq(Some(duration)),
+        ))
         .execute(conn)
         .await
     {
@@ -235,6 +246,28 @@ async fn generate_thumbnails(input: &Path, output_dir: &Path) -> Result<()> {
 
 fn get_video_dir(v_id: Uuid) -> PathBuf {
     PathBuf::from("uploads").join(v_id.to_string())
+}
+
+async fn get_video_duration(file_path: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            file_path,
+        ])
+        .output()
+        .await?;
+
+    let json: Value = serde_json::from_slice(&output.stdout)?;
+    let duration = json["format"]["duration"]
+        .as_str()
+        .ok_or("No duration found")?
+        .parse::<f64>()?;
+
+    Ok(duration)
 }
 
 fn parse_bitrate(bitrate: &str) -> Result<u32> {
