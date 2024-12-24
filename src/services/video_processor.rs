@@ -5,6 +5,7 @@ use actix_multipart::Multipart;
 use actix_web::{web, Error};
 use anyhow::{Context, Result};
 use chrono::Utc;
+use diesel::ExpressionMethods;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{StreamExt, TryStreamExt};
 use std::path::{Path, PathBuf};
@@ -23,10 +24,10 @@ const QUALITIES: &[(&str, &str)] = &[
 
 pub async fn handle_upload(
     mut payload: Multipart,
-    video_id: Uuid,
+    v_id: Uuid,
     pool: web::Data<DbPool>,
 ) -> Result<(), Error> {
-    let upload_dir = get_video_dir(video_id);
+    let upload_dir = get_video_dir(v_id);
     fs::create_dir_all(&upload_dir).await.map_err(|e| {
         log::error!("Failed to create upload directory: {}", e);
         actix_web::error::ErrorInternalServerError("Storage error")
@@ -64,7 +65,7 @@ pub async fn handle_upload(
     }
 
     // Spawn video processing
-    let video_id_str = video_id.to_string();
+    let video_id_str = v_id.to_string();
 
     tokio::spawn(async move {
         let mut conn = pool.get().await.expect("Failed to get DB connection");
@@ -76,8 +77,10 @@ pub async fn handle_upload(
     Ok(())
 }
 
-async fn process_video(video_id: &str, conn: &mut AsyncPgConnection) -> Result<()> {
-    let video_dir = get_video_dir(Uuid::parse_str(video_id)?);
+async fn process_video(v_id: &str, conn: &mut AsyncPgConnection) -> Result<()> {
+    use crate::db::schema::videos;
+
+    let video_dir = get_video_dir(Uuid::parse_str(v_id)?);
     let input_path = video_dir.join("original.mp4");
     let hls_dir = video_dir.join("hls");
     fs::create_dir_all(&hls_dir).await?;
@@ -96,7 +99,7 @@ async fn process_video(video_id: &str, conn: &mut AsyncPgConnection) -> Result<(
                 // Store successful transcoding in database
                 let video_quality = VideoQuality {
                     id: Uuid::new_v4(),
-                    video_id: Uuid::parse_str(video_id)?,
+                    video_id: Uuid::parse_str(v_id)?,
                     resolution: quality.to_string(),
                     bitrate: bitrate.to_string(),
                     file_path: format!("hls/{}/stream.m3u8", quality),
@@ -129,6 +132,19 @@ async fn process_video(video_id: &str, conn: &mut AsyncPgConnection) -> Result<(
             }
         }
     }
+
+    let uuid_vid_id = Uuid::parse_str(v_id).expect("Failed to parse video id into uuid");
+    match diesel::update(videos::table)
+        .filter(videos::id.eq(uuid_vid_id))
+        .set(videos::status.eq("processed"))
+        .execute(conn)
+        .await
+    {
+        Ok(_) => {}
+        Err(e) => {
+            log::error!("Failed to update video status: {e}");
+        }
+    };
 
     // Write master playlist
     fs::write(hls_dir.join("master.m3u8"), master_playlist).await?;
@@ -217,8 +233,8 @@ async fn generate_thumbnails(input: &Path, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn get_video_dir(video_id: Uuid) -> PathBuf {
-    PathBuf::from("uploads").join(video_id.to_string())
+fn get_video_dir(v_id: Uuid) -> PathBuf {
+    PathBuf::from("uploads").join(v_id.to_string())
 }
 
 fn parse_bitrate(bitrate: &str) -> Result<u32> {
