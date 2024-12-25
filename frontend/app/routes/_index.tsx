@@ -1,65 +1,86 @@
-import type { ActionFunctionArgs, MetaFunction } from "@remix-run/node";
-import { Form } from "@remix-run/react";
-
-export const meta: MetaFunction = () => {
-  return [
-    { title: "New Remix App" },
-    { name: "description", content: "Welcome to Remix!" },
-  ];
+import { useLoaderData } from "@remix-run/react";
+import { formatDistance } from "date-fns";
+const formatDuration = (duration: number) => {
+  const minutes = Math.floor(duration / 60);
+  const seconds = duration % 60;
+  return `${minutes}:${seconds.toFixed(0).toString().padStart(2, "0")}`;
 };
 
-const uploadToStorage = async (file: File) => {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  const response = await fetch("http://localhost:8080/api/v1/videos", {
-    method: "POST",
-    body: formData,
-  });
+const fetchVideos = async () => {
+  const response = await fetch("http://localhost:8080/api/v1/videos");
 
   if (!response.ok) {
     console.error(response);
-    throw new Error("Failed to upload file");
+    throw new Error("Failed to fetch videos");
   }
 
   return response.json();
 };
 
-export async function action({ request }: ActionFunctionArgs) {
-  const formData = await request.formData();
-  const file = formData.get("file") as File;
+type Meta = {
+  base: string;
+  page: number;
+  per_page: number;
+  total: number;
+  total_pages: number;
+};
 
-  if (!file) {
-    return { error: "No file uploaded" };
-  }
+type Quality = {
+  bitrate: `{number}p`;
+  created_at: Date;
+  file_path: string;
+  id: string;
+  resolution: `${number}p`;
+  video_id: string;
+};
 
-  // Validate file type
-  if (!file.type.startsWith("video/")) {
-    return { error: "Please upload a video file" };
-  }
+type Video = {
+  created_at: Date;
+  description: string | null;
+  duration: number | null;
+  id: string;
+  qualities: Quality[];
+  status: "processed" | "processing" | "failed" | "uploading";
+  stream_url: string;
+  thumbnail_url: string;
+  title: string;
+  updated_at: Date;
+};
 
-  try {
-    try {
-      const uploadResult = await uploadToStorage(file);
-      console.log(uploadResult);
-      return { success: true };
-    } catch (error) {
-      // console.error("Upload failed:", error);
-      return { error: "Failed to upload file" };
-    }
-  } catch (error) {
-    console.error("Upload failed:", error);
-    return { error: "Failed to upload file" };
-  }
+export async function loader() {
+  const videos = (await fetchVideos()) as {
+    meta: Meta;
+    videos: Video[];
+  };
+  return videos;
 }
 
-export default function Index() {
+export default function Homepage() {
+  const { videos } = useLoaderData<typeof loader>();
+
   return (
-    <div className="flex h-screen items-center justify-center">
-      <Form method="post" encType="multipart/form-data">
-        <input type="file" name="file" accept="video/*" required />
-        <button type="submit">Upload</button>
-      </Form>
-    </div>
+    <main className="max-w-screen-lg mx-auto p-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 auto-rows-fr">
+        {videos.map((video) => (
+          <div key={video.id} className="space-y-2">
+            <div className="object-contain rounded aspect-[16/9] overflow-hidden relative">
+              <img src={video.thumbnail_url} alt={video.title} />
+              <p className="absolute right-0 bottom-0 px-1 py-0.1 bg-black/50">
+                {video.duration ? formatDuration(video.duration) : "—"}
+              </p>
+            </div>
+            <div>
+              <h2 className="font-semibold">{video.title}</h2>
+              <p className="text-sm text-gray-500">
+                {formatDistance(video.created_at, new Date(), {
+                  addSuffix: true,
+                })}
+              </p>
+            </div>
+            {/* <p>{video.description}</p> */}
+          </div>
+        ))}
+      </div>
+    </main>
   );
 }
