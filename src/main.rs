@@ -1,3 +1,4 @@
+use actix_files::Files;
 use actix_web::{web, App, HttpServer};
 use dotenv::dotenv;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ async fn main() -> std::io::Result<()> {
     // Start HTTP server
     HttpServer::new(move || {
         App::new()
+            .service(Files::new("/uploads", "uploads/").show_files_listing())
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(c.clone()))
             .wrap(actix_cors::Cors::permissive()) // Configure properly in production

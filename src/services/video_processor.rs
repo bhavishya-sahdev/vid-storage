@@ -1,13 +1,11 @@
 // src/services/video_processor.rs
 use crate::db::models::VideoQuality;
 use crate::db::DbPool;
-use actix_multipart::Multipart;
 use actix_web::{web, Error};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use diesel::ExpressionMethods;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, OpenOptions};
@@ -24,7 +22,7 @@ const QUALITIES: &[(&str, &str)] = &[
 ];
 
 pub async fn handle_upload(
-    mut payload: Multipart,
+    video_data: Vec<u8>,
     v_id: Uuid,
     pool: web::Data<DbPool>,
 ) -> Result<(), Error> {
@@ -35,34 +33,40 @@ pub async fn handle_upload(
     })?;
 
     let filepath = upload_dir.join("original.mp4");
-
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&filepath)
-            .await
-            .map_err(|e| {
-                log::error!("Failed to open file: {}", e);
-                actix_web::error::ErrorInternalServerError("Storage error")
-            })?;
-
-        while let Some(chunk) = field.next().await {
-            let data = chunk.map_err(|e| {
-                log::error!("Error getting chunk: {}", e);
-                actix_web::error::ErrorInternalServerError("Upload error")
-            })?;
-
-            f.write_all(&data).await.map_err(|e| {
-                log::error!("Error writing chunk: {}", e);
-                actix_web::error::ErrorInternalServerError("Storage error")
-            })?;
-        }
-
-        f.sync_all().await.map_err(|e| {
-            log::error!("Error syncing file: {}", e);
+    // Write the video data to file
+    let mut f = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&filepath)
+        .await
+        .map_err(|e| {
+            log::error!("Failed to open file: {}", e);
             actix_web::error::ErrorInternalServerError("Storage error")
         })?;
+
+    f.write_all(&video_data).await.map_err(|e| {
+        log::error!("Error writing file: {}", e);
+        actix_web::error::ErrorInternalServerError("Storage error")
+    })?;
+
+    f.sync_all().await.map_err(|e| {
+        log::error!("Error syncing file: {}", e);
+        actix_web::error::ErrorInternalServerError("Storage error")
+    })?;
+
+    // Get video duration before processing
+    if let Ok(duration) = get_video_duration(&filepath.to_string_lossy()).await {
+        let conn = &mut pool.get().await.expect("Failed to get DB connection");
+        diesel::update(crate::db::schema::videos::table)
+            .filter(crate::db::schema::videos::id.eq(v_id))
+            .set(crate::db::schema::videos::duration.eq(duration))
+            .execute(conn)
+            .await
+            .map_err(|e| {
+                log::error!("Error updating video duration: {}", e);
+                actix_web::error::ErrorInternalServerError("Database error")
+            })?;
     }
 
     // Spawn video processing
@@ -72,6 +76,16 @@ pub async fn handle_upload(
         let mut conn = pool.get().await.expect("Failed to get DB connection");
         if let Err(e) = process_video(&video_id_str, &mut conn).await {
             log::error!("Error processing video {}: {}", video_id_str, e);
+
+            // Update status to failed if processing fails
+            if let Err(db_err) = diesel::update(crate::db::schema::videos::table)
+                .filter(crate::db::schema::videos::id.eq(Uuid::parse_str(&video_id_str).unwrap()))
+                .set(crate::db::schema::videos::status.eq("failed"))
+                .execute(&mut conn)
+                .await
+            {
+                log::error!("Error updating video status: {}", db_err);
+            }
         }
     });
 
@@ -206,6 +220,8 @@ async fn transcode_to_hls(
         .arg(segment_duration.to_string())
         .arg("-hls_playlist_type")
         .arg("vod")
+        .arg("-loglevel")
+        .arg("quiet")
         .arg("-hls_segment_filename")
         .arg(output.parent().unwrap().join("segment_%03d.ts"))
         .arg(output)
@@ -233,6 +249,8 @@ async fn generate_thumbnails(input: &Path, output_dir: &Path) -> Result<()> {
         .arg("1")
         .arg("-vf")
         .arg("scale=320:-1")
+        .arg("-loglevel")
+        .arg("quiet")
         .arg(thumbnails_dir.join("thumb_%d.jpg"))
         .status()
         .await?;
