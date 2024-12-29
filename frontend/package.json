@@ -15,7 +15,9 @@
     "@remix-run/react": "^2.15.1",
     "@remix-run/serve": "^2.15.1",
     "date-fns": "^4.1.0",
+    "hls.js": "^1.5.18",
     "isbot": "^4.1.0",
+    "lucide-react": "^0.469.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
