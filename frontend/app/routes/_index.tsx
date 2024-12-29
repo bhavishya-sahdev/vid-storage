@@ -1,4 +1,4 @@
-import { useLoaderData } from "@remix-run/react";
+import { useLoaderData, useNavigate } from "@remix-run/react";
 import { formatDistance } from "date-fns";
 const formatDuration = (duration: number) => {
   const minutes = Math.floor(duration / 60);
@@ -57,12 +57,25 @@ export async function loader() {
 
 export default function Homepage() {
   const { videos } = useLoaderData<typeof loader>();
+  const navigate = useNavigate();
 
   return (
     <main className="max-w-screen-lg mx-auto p-4">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 auto-rows-fr">
         {videos.map((video) => (
-          <div key={video.id} className="space-y-2">
+          <div
+            key={video.id}
+            className="space-y-2"
+            role="link"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              console.log(e.key);
+              if (e.key.toLowerCase() == "enter") {
+                navigate(`/video/${video.id}`);
+              }
+            }}
+            onClick={() => navigate(`/video/${video.id}`)}
+          >
             <div className="object-contain rounded aspect-[16/9] overflow-hidden relative">
               <img src={video.thumbnail_url} alt={video.title} />
               <p className="absolute right-0 bottom-0 px-1 py-0.1 bg-black/50">
