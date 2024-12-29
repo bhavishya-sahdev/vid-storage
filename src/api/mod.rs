@@ -1,5 +1,6 @@
 // src/api/mod.rs
 pub mod health;
+pub mod shared;
 pub mod videos;
 
 use actix_web::web;
