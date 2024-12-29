@@ -1,12 +1,17 @@
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use crate::api::shared::{parse_error, ResponseType};
 use crate::db::models::{VideoQuality, VideoWithMeta};
 use crate::db::{models::Video, DbPool};
 use crate::services::video_processor;
+use actix_files::NamedFile;
 use actix_multipart::Multipart;
 use actix_web::{web, Error, HttpRequest, HttpResponse};
-use diesel::{ExpressionMethods, QueryDsl};
+use diesel::{BoolExpressionMethods, ExpressionMethods, QueryDsl};
 use diesel_async::RunQueryDsl;
 use futures::TryStreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -14,7 +19,17 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/videos")
             .route("", web::post().to(upload_video))
-            .route("", web::get().to(list_videos)), // .route("/{id}", web::get().to(get_video)),
+            .route("/{id}", web::get().to(video_details))
+            .route("/{id}/master.m3u8", web::get().to(serve_master_playlist))
+            .route(
+                "/{id}/{quality}/playlist.m3u8",
+                web::get().to(serve_quality_playlist),
+            )
+            .route(
+                "/{video_id}/{quality}/{segment}",
+                web::get().to(serve_segment),
+            )
+            .route("", web::get().to(list_videos)),
     );
 }
 
@@ -123,6 +138,13 @@ pub async fn upload_video(
     Ok(HttpResponse::Ok().json(video))
 }
 
+#[derive(Debug, Serialize)]
+struct VideoWithThumbnail {
+    #[serde(flatten)]
+    pub video: Video,
+    pub thumbnail_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListQueryParams {
     pub page: Option<i64>,
@@ -134,7 +156,7 @@ pub async fn list_videos(
     query: web::Query<ListQueryParams>,
     pool: web::Data<DbPool>,
 ) -> Result<HttpResponse, Error> {
-    use crate::db::schema::{video_qualities, videos::dsl::*};
+    use crate::db::schema::videos::dsl::*;
     let conn = &mut pool.get().await.expect("Failed to get DB connection");
     let base_url = format!(
         "{}://{}",
@@ -158,30 +180,13 @@ pub async fn list_videos(
             actix_web::error::ErrorInternalServerError("Database error")
         })?;
 
-    let video_ids: Vec<Uuid> = video_list.iter().map(|v| v.id).collect();
-    let qualities = video_qualities::table
-        .filter(video_qualities::video_id.eq_any(video_ids))
-        .load::<VideoQuality>(conn)
-        .await
-        .map_err(|e| {
-            eprintln!("Error loading video qualities: {}", e);
-            actix_web::error::ErrorInternalServerError("Database error")
-        })?;
-
-    let videos_with_qualities: Vec<VideoWithMeta> = video_list
+    let videos_with_thumbnail: Vec<VideoWithThumbnail> = video_list
         .into_iter()
         .map(|video| {
-            let video_qualities: Vec<VideoQuality> = qualities
-                .iter()
-                .filter(|q| q.video_id == video.id)
-                .cloned()
-                .collect();
             let video_id = video.id;
-            VideoWithMeta {
+            VideoWithThumbnail {
                 video,
-                qualities: video_qualities,
                 thumbnail_url: format!("{}/uploads/{}/thumbnails/thumb_0.jpg", base_url, video_id),
-                stream_url: format!("{}/uploads/{}/hls/master.m3u8", base_url, video_id),
             }
         })
         .collect();
@@ -192,7 +197,7 @@ pub async fn list_videos(
     })?;
 
     Ok(HttpResponse::Ok().json(json!({
-        "videos": videos_with_qualities,
+        "videos": videos_with_thumbnail,
         "meta": {
             "total": total_count,
             "page": page,
@@ -201,4 +206,101 @@ pub async fn list_videos(
             "base": base_url,
         }
     })))
+}
+
+pub async fn video_details(
+    req: HttpRequest,
+    path: web::Path<String>,
+    pool: web::Data<DbPool>,
+) -> Result<HttpResponse, Error> {
+    use crate::db::schema::{video_qualities, videos};
+    let conn = &mut pool.get().await.expect("Failed to get DB connection");
+    let video_id = match Uuid::from_str(&path.into_inner()) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(parse_error(
+                "video_id".to_string(),
+                "Failed to parse video id".to_string(),
+            ))
+        }
+    };
+    let base_url = format!(
+        "{}://{}",
+        req.connection_info().scheme(),
+        req.connection_info().host()
+    );
+
+    let video = match videos::table
+        .filter(videos::id.eq(video_id).and(videos::status.eq("processed")))
+        .first::<Video>(conn)
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(parse_error(
+                "db_video_data".to_string(),
+                "Failed to load video data".to_string(),
+            ))
+        }
+    };
+
+    let video_qualities = video_qualities::table
+        .filter(video_qualities::video_id.eq(video_id))
+        .load::<VideoQuality>(conn)
+        .await
+        .map_err(|e| {
+            eprintln!("Error loading video qualities: {}", e);
+            actix_web::error::ErrorInternalServerError("Database error")
+        })?;
+
+    Ok(
+        HttpResponse::Ok().json(json!(ResponseType::<VideoWithMeta> {
+            data: Some(VideoWithMeta {
+                video,
+                qualities: video_qualities,
+                thumbnail_url: format!("{}/uploads/{}/thumbnails/thumb_0.jpg", base_url, video_id),
+                stream_url: format!("{}/uploads/{}/hls/master.m3u8", base_url, video_id),
+            }),
+            error: None
+        })),
+    )
+}
+
+pub async fn serve_master_playlist(video_id: web::Path<Uuid>) -> Result<NamedFile, Error> {
+    let path = PathBuf::from("uploads")
+        .join(video_id.to_string())
+        .join("hls")
+        .join("master.m3u8");
+
+    Ok(NamedFile::open(path)
+        .map_err(|_| actix_web::error::ErrorNotFound("Playlist not found"))?
+        // .set_content_type("application/vnd.apple.mpegurl")
+        .use_last_modified(true))
+}
+
+pub async fn serve_quality_playlist(params: web::Path<(Uuid, String)>) -> Result<NamedFile, Error> {
+    let (video_id, quality) = params.into_inner();
+    let path = PathBuf::from("uploads")
+        .join(video_id.to_string())
+        .join("hls")
+        .join(quality)
+        .join("playlist.m3u8");
+
+    Ok(NamedFile::open(path)
+        .map_err(|_| actix_web::error::ErrorNotFound("Playlist not found"))?
+        // .set_content_type("application/vnd.apple.mpegurl")
+        .use_last_modified(true))
+}
+
+pub async fn serve_segment(params: web::Path<(Uuid, String, String)>) -> Result<NamedFile, Error> {
+    let (video_id, quality, segment) = params.into_inner();
+    let path = PathBuf::from("uploads")
+        .join(video_id.to_string())
+        .join("hls")
+        .join(quality)
+        .join(segment);
+
+    Ok(NamedFile::open(path)
+        .map_err(|_| actix_web::error::ErrorNotFound("Segment not found"))?
+        .use_last_modified(true))
 }
